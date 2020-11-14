@@ -10,7 +10,7 @@ The UCI frontend I'm using is https://github.com/fohristiwhirl/nibbler
 - Sadly single-core 'cause alpha-beta makes parallelism hard
 - Makes moves in a few seconds to a few minutes depending on board state
 
-## Heuristic
+## The Heuristic
 
 …is just
 
@@ -20,6 +20,8 @@ The UCI frontend I'm using is https://github.com/fohristiwhirl/nibbler
 + <material value of light pieces>
 - <material value of dark pieces>
 ```
+
+plus a little incentive to move the pawns forward.
 
 That means that the engine sometimes ~~blunders~~ gambits minor pieces or even the queen if that
 means it then has equivalently more valid moves.

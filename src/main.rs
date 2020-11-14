@@ -55,8 +55,8 @@ fn main() {
     }
 }
 
-fn search(pos: &Chess, depth: u8, dbg_write: &mut impl Write) -> Option<(Move, f64)> {
-    do_search(pos, pos, depth, f64::MIN, f64::MAX, &mut vec![], dbg_write)
+fn search(pos: &Chess, depth: u8, dbg_write: &mut impl Write) -> Option<(Move, i32)> {
+    do_search(pos, pos, depth, i32::MIN, i32::MAX, &mut vec![], dbg_write)
         .map(|(m, score)| (m.unwrap(), score))
 }
 
@@ -64,11 +64,11 @@ fn do_search(
     pos: &Chess,
     prev_pos: &Chess,
     depth: u8,
-    alpha: f64,
-    beta: f64,
+    alpha: i32,
+    beta: i32,
     prev_moves: &mut Vec<String>,
     dbg_write: &mut impl Write,
-) -> Option<(Option<Move>, f64)> {
+) -> Option<(Option<Move>, i32)> {
     let color = pos.turn();
     if depth == 0 {
         let score = score(prev_pos, pos);
@@ -76,41 +76,42 @@ fn do_search(
         return Some((None, score));
     }
     if pos.is_checkmate() {
-        let score = color.fold(-10000.0 - depth as f64, 10000.0 + depth as f64);
+        let score = color.fold(-10000 - depth as i32, 10000 + depth as i32);
         // writeln!(dbg_write, "{:?} {} mate", prev_moves, score).unwrap();
         return Some((None, score));
     }
     if pos.is_stalemate() {
         // writeln!(dbg_write, "{:?} 0.0, stale", prev_moves).unwrap();
-        return Some((None, 0.0));
+        return Some((None, 0));
     }
 
     let mut alpha = alpha;
     let mut beta = beta;
-    let mut best: Option<(Option<Move>, f64)> = None;
+    let mut best: Option<(Option<Move>, i32)> = None;
 
     for m in pos.legals() {
         let new_pos = pos.clone().play(&m).unwrap();
-        prev_moves.push(Uci::from_move(pos, &m).to_string());
-        let further_moves = do_search(&new_pos, pos, depth - 1, alpha, beta, prev_moves, dbg_write);
-        prev_moves.pop();
-        if let Some((_, score)) = further_moves {
-            if best.is_none()
-                || color.fold(
-                    score > best.as_ref().unwrap().1,
-                    score < best.as_ref().unwrap().1,
-                )
-            {
+        // prev_moves.push(Uci::from_move(pos, &m).to_string());
+        let further_move = do_search(&new_pos, pos, depth - 1, alpha, beta, prev_moves, dbg_write);
+        // prev_moves.pop();
+        if let Some((_, score)) = further_move {
+            let new_best = best
+                .as_ref()
+                .map(|(_, best)| {
+                    color.fold(score > *best, score < *best) || score == *best && rand::random()
+                })
+                .unwrap_or(true);
+            if new_best {
                 best = Some((Some(m), score));
             }
             if color.is_white() {
                 alpha = alpha.max(score);
-                if alpha >= beta {
+                if alpha > beta {
                     break;
                 }
             } else {
                 beta = beta.min(score);
-                if beta <= alpha {
+                if beta < alpha {
                     break;
                 }
             }
@@ -126,27 +127,37 @@ fn do_search(
     best
 }
 
-fn score(prev_pos: &Chess, new_pos: &Chess) -> f64 {
+fn score(prev_pos: &Chess, new_pos: &Chess) -> i32 {
     let mut move_list = MoveList::new();
     legal_moves_ignoreing_check(prev_pos, &mut move_list);
-    let prev_moves = move_list.len() as f64;
+    let prev_moves = move_list.len();
     legal_moves_ignoreing_check(new_pos, &mut move_list);
-    let moves = move_list.len() as f64;
+    let moves = move_list.len();
 
     let board = new_pos.board();
+    let white_pawns = board.pawns() & board.white();
     let white_value = (board.queens() & board.white()).count() * 9
         + (board.rooks() & board.white()).count() * 5
         + (board.bishops() & board.white()).count() * 3
         + (board.knights() & board.white()).count() * 3
-        + (board.pawns() & board.white()).count();
+        + (board.pawns() & board.white()).count()
+        + (white_pawns & Bitboard::rank(Rank::Fourth)).count()
+        + (white_pawns & Bitboard::rank(Rank::Fifth)).count()
+        + (white_pawns & Bitboard::rank(Rank::Sixth)).count() * 2
+        + (white_pawns & Bitboard::rank(Rank::Seventh)).count() * 2;
+    let black_pawns = board.pawns() & board.black();
     let black_value = (board.queens() & board.black()).count() * 9
         + (board.rooks() & board.black()).count() * 5
         + (board.bishops() & board.black()).count() * 3
         + (board.knights() & board.black()).count() * 3
-        + (board.pawns() & board.black()).count();
+        + (board.pawns() & board.black()).count()
+        + (black_pawns & Bitboard::rank(Rank::Fifth)).count()
+        + (black_pawns & Bitboard::rank(Rank::Fourth)).count()
+        + (black_pawns & Bitboard::rank(Rank::Third)).count() * 2
+        + (black_pawns & Bitboard::rank(Rank::Second)).count() * 2;
 
-    new_pos.turn().fold(moves - prev_moves, prev_moves - moves) + white_value as f64
-        - black_value as f64
+    new_pos.turn().fold(moves - prev_moves, prev_moves - moves) as i32 + white_value as i32 * 2
+        - black_value as i32 * 2
 }
 
 fn legal_moves_ignoreing_check(pos: &Chess, moves: &mut MoveList) {
