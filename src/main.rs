@@ -5,7 +5,7 @@ use shakmaty::{
     attacks, Bitboard, Board, Castles, CastlingSide, Chess, Color, Move, MoveList, Position, Rank,
     Role, Setup, Square,
 };
-use std::io;
+use std::{collections::HashSet, io};
 
 fn main() {
     let stdin = io::stdin();
@@ -19,6 +19,8 @@ fn main() {
     };
     let mut dbg_write = BufWriter::new(f);
 
+    let mut seen_positions = HashSet::new();
+
     for line in stdin.lines().filter_map(Result::ok) {
         let line = line.as_str();
         eprintln!("recv {}", &line);
@@ -29,23 +31,26 @@ fn main() {
             let raw_fen = parts.next().unwrap();
             let setup: Fen = raw_fen.parse().unwrap();
             let mut g: Chess = setup.position().unwrap();
-            let moves = parts
-                .next()
-                .unwrap()
-                .split(' ')
-                .skip(1)
-                .map(|m| m.parse::<Uci>().unwrap())
-                .collect::<Vec<Uci>>();
-            for m in moves {
-                let m = m.to_move(&g).unwrap();
-                g = g.play(&m).unwrap();
+            seen_positions = HashSet::new();
+            seen_positions.insert(g.board().clone());
+            if let Some(moves) = parts.next() {
+                let moves = moves
+                    .split(' ')
+                    .skip(1)
+                    .map(|m| m.parse::<Uci>().unwrap())
+                    .collect::<Vec<Uci>>();
+                for m in moves {
+                    let m = m.to_move(&g).unwrap();
+                    g = g.play(&m).unwrap();
+                    seen_positions.insert(g.board().clone());
+                }
             }
             game = Some(g);
         } else if line == "isready" {
             send("readyok");
         } else if line.starts_with("go ") {
             let game = game.as_mut().unwrap();
-            let (m, score) = search(game, 6, &mut dbg_write).unwrap();
+            let (m, score) = search(game, 6, &seen_positions, &mut dbg_write).unwrap();
             eprintln!("{} score {}", Uci::from_move(game, &m), score);
             send(&format!(
                 "bestmove {}",
@@ -55,28 +60,53 @@ fn main() {
     }
 }
 
-fn search(pos: &Chess, depth: u8, dbg_write: &mut impl Write) -> Option<(Move, i32)> {
-    do_search(pos, pos, depth, i32::MIN, i32::MAX, &mut vec![], dbg_write)
-        .map(|(m, score)| (m.unwrap(), score))
+fn search(
+    pos: &Chess,
+    depth: u8,
+    seen_positions: &HashSet<Board>,
+    dbg_write: &mut impl Write,
+) -> Option<(Move, i32)> {
+    do_search(
+        pos,
+        pos,
+        SearchState::with_max_depth(depth),
+        seen_positions,
+        dbg_write,
+    )
+    .map(|(m, score)| (m.unwrap(), score))
+}
+
+struct SearchState {
+    depth: u8,
+    alpha: i32,
+    beta: i32,
+}
+
+impl SearchState {
+    fn with_max_depth(max_depth: u8) -> Self {
+        Self {
+            depth: max_depth,
+            alpha: i32::MIN,
+            beta: i32::MAX,
+        }
+    }
 }
 
 fn do_search(
     pos: &Chess,
     prev_pos: &Chess,
-    depth: u8,
-    alpha: i32,
-    beta: i32,
-    prev_moves: &mut Vec<String>,
+    state: SearchState,
+    seen_positions: &HashSet<Board>,
     dbg_write: &mut impl Write,
 ) -> Option<(Option<Move>, i32)> {
     let color = pos.turn();
-    if depth == 0 {
+    if state.depth == 0 {
         let score = score(prev_pos, pos);
         // writeln!(dbg_write, "{:?} {}", prev_moves, score).unwrap();
         return Some((None, score));
     }
     if pos.is_checkmate() {
-        let score = color.fold(-10000 - depth as i32, 10000 + depth as i32);
+        let score = color.fold(-10000 - state.depth as i32, 10000 + state.depth as i32);
         // writeln!(dbg_write, "{:?} {} mate", prev_moves, score).unwrap();
         return Some((None, score));
     }
@@ -85,16 +115,31 @@ fn do_search(
         return Some((None, 0));
     }
 
-    let mut alpha = alpha;
-    let mut beta = beta;
+    let mut alpha = state.alpha;
+    let mut beta = state.beta;
     let mut best: Option<(Option<Move>, i32)> = None;
 
     for m in pos.legals() {
         let new_pos = pos.clone().play(&m).unwrap();
         // prev_moves.push(Uci::from_move(pos, &m).to_string());
-        let further_move = do_search(&new_pos, pos, depth - 1, alpha, beta, prev_moves, dbg_write);
+        let further_move = do_search(
+            &new_pos,
+            pos,
+            SearchState {
+                depth: state.depth - 1,
+                alpha,
+                beta,
+            },
+            seen_positions,
+            dbg_write,
+        );
         // prev_moves.pop();
         if let Some((_, score)) = further_move {
+            let score = if seen_positions.contains(new_pos.board()) {
+                0
+            } else {
+                score
+            };
             let new_best = best
                 .as_ref()
                 .map(|(_, best)| {
