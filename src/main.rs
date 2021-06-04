@@ -24,28 +24,36 @@ fn main() {
     for line in stdin.lines().filter_map(Result::ok) {
         let line = line.as_str();
         eprintln!("recv {}", &line);
-        if line == "ucinewgame" {
+        if line == "uci" {
             send("uciok");
-        } else if let Some(pos) = line.strip_prefix("position fen ") {
-            let mut parts = pos.split(" moves");
-            let raw_fen = parts.next().unwrap();
-            let setup: Fen = raw_fen.parse().unwrap();
-            let mut g: Chess = setup.position().unwrap();
-            seen_positions = HashSet::new();
-            seen_positions.insert(g.board().clone());
-            if let Some(moves) = parts.next() {
-                let moves = moves
+        } else if let Some(pos) = line.strip_prefix("position startpos") {
+            let mut parts = pos.split(" moves").skip(1);
+            let raw_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let moves = if let Some(moves) = parts.next() {
+                moves
                     .split(' ')
                     .skip(1)
                     .map(|m| m.parse::<Uci>().unwrap())
-                    .collect::<Vec<Uci>>();
-                for m in moves {
-                    let m = m.to_move(&g).unwrap();
-                    g = g.play(&m).unwrap();
-                    seen_positions.insert(g.board().clone());
-                }
-            }
-            game = Some(g);
+                    .collect::<Vec<Uci>>()
+            } else {
+                vec![]
+            };
+            seen_positions = HashSet::new();
+            setup_with_fen_and_moves(raw_fen, moves, &mut seen_positions, &mut game);
+        } else if let Some(pos) = line.strip_prefix("position fen ") {
+            let mut parts = pos.split(" moves");
+            let raw_fen = parts.next().unwrap();
+            let moves = if let Some(moves) = parts.next() {
+                moves
+                    .split(' ')
+                    .skip(1)
+                    .map(|m| m.parse::<Uci>().unwrap())
+                    .collect::<Vec<Uci>>()
+            } else {
+                vec![]
+            };
+            seen_positions = HashSet::new();
+            setup_with_fen_and_moves(raw_fen, moves, &mut seen_positions, &mut game);
         } else if line == "isready" {
             send("readyok");
         } else if line.starts_with("go ") {
@@ -58,6 +66,23 @@ fn main() {
             ));
         }
     }
+}
+
+fn setup_with_fen_and_moves(
+    raw_fen: &str,
+    moves: Vec<Uci>,
+    seen_positions: &mut HashSet<Board>,
+    game: &mut Option<Chess>,
+) {
+    let setup: Fen = raw_fen.parse().unwrap();
+    let mut g: Chess = setup.position().unwrap();
+    seen_positions.insert(g.board().clone());
+    for m in moves {
+        let m = m.to_move(&g).unwrap();
+        g = g.play(&m).unwrap();
+        seen_positions.insert(g.board().clone());
+    }
+    *game = Some(g);
 }
 
 fn search(
@@ -119,8 +144,23 @@ fn do_search(
     let mut beta = state.beta;
     let mut best: Option<(Option<Move>, i32)> = None;
 
-    for m in pos.legals() {
-        let new_pos = pos.clone().play(&m).unwrap();
+    let legals = pos.legals();
+
+    let mut move_pos: Vec<(Move, Chess)> = legals
+        .into_iter()
+        .map(|m| {
+            let chess = pos.clone().play(&m).unwrap();
+            (m, chess)
+        })
+        .collect();
+    move_pos.sort_by_cached_key(|(_, pos)| {
+        if color.is_white() {
+            -board_value(pos.board())
+        } else {
+            board_value(pos.board())
+        }
+    });
+    for (m, new_pos) in move_pos {
         // prev_moves.push(Uci::from_move(pos, &m).to_string());
         let further_move = do_search(
             &new_pos,
@@ -172,22 +212,15 @@ fn do_search(
     best
 }
 
-fn score(prev_pos: &Chess, new_pos: &Chess) -> i32 {
-    let mut move_list = MoveList::new();
-    legal_moves_ignoreing_check(prev_pos, &mut move_list);
-    let prev_moves = move_list.len();
-    legal_moves_ignoreing_check(new_pos, &mut move_list);
-    let moves = move_list.len();
-
-    let board = new_pos.board();
+fn board_value(board: &Board) -> i32 {
     let white_pawns = board.pawns() & board.white();
     let white_value = (board.queens() & board.white()).count() * 9
         + (board.rooks() & board.white()).count() * 5
         + (board.bishops() & board.white()).count() * 3
         + (board.knights() & board.white()).count() * 3
-        + (board.pawns() & board.white()).count()
+        + white_pawns.count()
         + (white_pawns & Bitboard::rank(Rank::Fourth)).count()
-        + (white_pawns & Bitboard::rank(Rank::Fifth)).count()
+        + (white_pawns & Bitboard::rank(Rank::Fifth)).count() * 1
         + (white_pawns & Bitboard::rank(Rank::Sixth)).count() * 2
         + (white_pawns & Bitboard::rank(Rank::Seventh)).count() * 2;
     let black_pawns = board.pawns() & board.black();
@@ -195,14 +228,25 @@ fn score(prev_pos: &Chess, new_pos: &Chess) -> i32 {
         + (board.rooks() & board.black()).count() * 5
         + (board.bishops() & board.black()).count() * 3
         + (board.knights() & board.black()).count() * 3
-        + (board.pawns() & board.black()).count()
+        + black_pawns.count()
         + (black_pawns & Bitboard::rank(Rank::Fifth)).count()
-        + (black_pawns & Bitboard::rank(Rank::Fourth)).count()
+        + (black_pawns & Bitboard::rank(Rank::Fourth)).count() * 1
         + (black_pawns & Bitboard::rank(Rank::Third)).count() * 2
         + (black_pawns & Bitboard::rank(Rank::Second)).count() * 2;
 
-    new_pos.turn().fold(moves - prev_moves, prev_moves - moves) as i32 + white_value as i32 * 2
-        - black_value as i32 * 2
+    white_value as i32 - black_value as i32
+}
+
+fn score(prev_pos: &Chess, new_pos: &Chess) -> i32 {
+    let mut move_list = MoveList::new();
+    legal_moves_ignoreing_check(prev_pos, &mut move_list);
+    let prev_moves = move_list.len();
+    legal_moves_ignoreing_check(new_pos, &mut move_list);
+    let moves = move_list.len();
+
+    let board_value = board_value(new_pos.board());
+
+    new_pos.turn().fold(moves - prev_moves, prev_moves - moves) as i32 + board_value * 2
 }
 
 fn legal_moves_ignoreing_check(pos: &Chess, moves: &mut MoveList) {
