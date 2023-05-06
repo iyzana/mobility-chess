@@ -1,3 +1,4 @@
+use chull::ConvexHull;
 use io::{BufRead, BufWriter, Write};
 use shakmaty::fen::Fen;
 use shakmaty::uci::Uci;
@@ -91,11 +92,13 @@ fn search(
     seen_positions: &HashSet<Board>,
     dbg_write: &mut impl Write,
 ) -> Option<(Move, i32)> {
+    let mut storage = Vec::new();
     do_search(
         pos,
         pos,
         SearchState::with_max_depth(depth),
         seen_positions,
+        &mut storage,
         dbg_write,
     )
     .map(|(m, score)| (m.unwrap(), score))
@@ -122,11 +125,12 @@ fn do_search(
     prev_pos: &Chess,
     state: SearchState,
     seen_positions: &HashSet<Board>,
+    storage: &mut Vec<Vec<i32>>,
     dbg_write: &mut impl Write,
 ) -> Option<(Option<Move>, i32)> {
     let color = pos.turn();
     if state.depth == 0 {
-        let score = score(prev_pos, pos);
+        let score = mobility_score(prev_pos, pos);
         // writeln!(dbg_write, "{:?} {}", prev_moves, score).unwrap();
         return Some((None, score));
     }
@@ -155,9 +159,9 @@ fn do_search(
         .collect();
     move_pos.sort_by_cached_key(|(_, pos)| {
         if color.is_white() {
-            -board_value(pos.board())
+            -mobility_score(prev_pos, pos)
         } else {
-            board_value(pos.board())
+            mobility_score(prev_pos, pos)
         }
     });
     for (m, new_pos) in move_pos {
@@ -171,6 +175,7 @@ fn do_search(
                 beta,
             },
             seen_positions,
+            storage,
             dbg_write,
         );
         // prev_moves.pop();
@@ -218,9 +223,9 @@ fn board_value(board: &Board) -> i32 {
         + (board.rooks() & board.white()).count() * 5
         + (board.bishops() & board.white()).count() * 3
         + (board.knights() & board.white()).count() * 3
-        + white_pawns.count()
+        + (white_pawns & Bitboard::rank(Rank::Third)).count()
         + (white_pawns & Bitboard::rank(Rank::Fourth)).count()
-        + (white_pawns & Bitboard::rank(Rank::Fifth)).count() * 1
+        + (white_pawns & Bitboard::rank(Rank::Fifth)).count()
         + (white_pawns & Bitboard::rank(Rank::Sixth)).count() * 2
         + (white_pawns & Bitboard::rank(Rank::Seventh)).count() * 2;
     let black_pawns = board.pawns() & board.black();
@@ -228,30 +233,66 @@ fn board_value(board: &Board) -> i32 {
         + (board.rooks() & board.black()).count() * 5
         + (board.bishops() & board.black()).count() * 3
         + (board.knights() & board.black()).count() * 3
-        + black_pawns.count()
+        + (black_pawns & Bitboard::rank(Rank::Sixth)).count()
         + (black_pawns & Bitboard::rank(Rank::Fifth)).count()
-        + (black_pawns & Bitboard::rank(Rank::Fourth)).count() * 1
+        + (black_pawns & Bitboard::rank(Rank::Fourth)).count()
         + (black_pawns & Bitboard::rank(Rank::Third)).count() * 2
         + (black_pawns & Bitboard::rank(Rank::Second)).count() * 2;
 
     white_value as i32 - black_value as i32
 }
 
-fn score(prev_pos: &Chess, new_pos: &Chess) -> i32 {
+fn mobility_score(prev_pos: &Chess, new_pos: &Chess) -> i32 {
     let mut move_list = MoveList::new();
     legal_moves_ignoreing_check(prev_pos, &mut move_list);
-    let prev_moves = move_list.len();
+    let prev_moves = move_list.len() as i32;
+    move_list.clear();
     legal_moves_ignoreing_check(new_pos, &mut move_list);
-    let moves = move_list.len();
+    let moves = move_list.len() as i32;
 
     let board_value = board_value(new_pos.board());
 
-    new_pos.turn().fold(moves - prev_moves, prev_moves - moves) as i32 + board_value * 2
+    new_pos.turn().fold(moves - prev_moves, prev_moves - moves) + board_value * 2
+}
+
+fn mobility_space_score(prev_pos: &Chess, new_pos: &Chess, storage: &mut Vec<Vec<i32>>) -> i32 {
+    let mut move_list = MoveList::new();
+
+    move_list.clear();
+    legal_moves_ignoreing_check(prev_pos, &mut move_list);
+    let prev_moves = move_list.len() as i32;
+    move_list.clear();
+    legal_moves_ignoreing_check(new_pos, &mut move_list);
+    let moves = move_list.len() as i32;
+
+    // let board_value = board_value(new_pos.board());
+
+    let white_coords = new_pos
+        .board()
+        .pieces()
+        .filter(|(_, piece)| piece.color.is_white())
+        .map(|(square, _)| vec![i32::from(square.file()), i32::from(square.rank())]);
+    storage.clear();
+    storage.extend(white_coords);
+    let white_hull = ConvexHull::try_new(&storage, 0, None)
+        .map(|hull| hull.volume())
+        .unwrap_or(0);
+    let black_coords = new_pos
+        .board()
+        .pieces()
+        .filter(|(_, piece)| piece.color.is_black())
+        .map(|(square, _)| vec![i32::from(square.file()), i32::from(square.rank())]);
+    storage.clear();
+    storage.extend(black_coords);
+    let black_hull = ConvexHull::try_new(&storage, 0, None)
+        .map(|hull| hull.volume())
+        .unwrap_or(0);
+    let volume_val = white_hull - black_hull;
+
+    (new_pos.turn().fold(moves - prev_moves, prev_moves - moves) as f32 * 1.5) as i32 + volume_val
 }
 
 fn legal_moves_ignoreing_check(pos: &Chess, moves: &mut MoveList) {
-    moves.clear();
-
     let king = pos
         .board()
         .king_of(pos.turn())
